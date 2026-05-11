@@ -6,42 +6,52 @@ import { useKeystroke } from "../hooks/useKeystroke";
 import { api } from "../api/client";
 
 const REQUIRED = 8;
+const FREE_TEXT_TARGET = 200; // keystrokes needed to seed LOF
+
+// Step labels — 5 steps total (0–4)
 const STEPS = [
   "Create your account",
-  "Read the guide",
-  "Enroll your typing pattern",
-  "Registration complete",
+  "Guidelines Review",
+  "Fixed-Phrase Enrollment",
+  "Free-Typing Enrollment",
+  "Registration Complete",
 ];
 
 export default function EnrollPage() {
   const navigate = useNavigate();
-  const ks = useKeystroke();
+  const ks = useKeystroke(); // used for phrase typing
+  const freeKs = useKeystroke(); // used for free-text typing
   const inputRef = useRef(null);
+  const freeTextRef = useRef(null);
 
   const [step, setStep] = useState(0);
   const [phrase, setPhrase] = useState("");
   const [user, setUser] = useState(null);
 
-  // Registration form held in state
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  // collectedAttempts: array of raw events arrays, one per attempt
-  // Nothing is sent to backend until all REQUIRED attempts are collected
   const [collectedAttempts, setCollectedAttempts] = useState([]);
   const [typed, setTyped] = useState("");
-  const [attemptOk, setAttemptOk] = useState(null); // null | 'ok' | 'err'
+  const [attemptOk, setAttemptOk] = useState(null);
+
+  // Free-text state
+  const [freeText, setFreeText] = useState("");
+  const [freeKeyCount, setFreeKeyCount] = useState(0);
+  const [seedLoading, setSeedLoading] = useState(false);
+  const [seedError, setSeedError] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const saved = collectedAttempts.length;
+  const freeProgress = Math.min(100, (freeKeyCount / FREE_TEXT_TARGET) * 100);
+  const freeReady = freeKeyCount >= FREE_TEXT_TARGET;
 
-  // Step 0: Validate form + fetch phrase, nothing saved to database yet
-
+  // ── Step 0: Validate form ──────────────────────────────────────────────────
   async function handleRegister() {
     setError("");
     if (
@@ -57,10 +67,8 @@ export default function EnrollPage() {
       return setError("Password must be at least 6 characters.");
     if (password !== confirmPassword)
       return setError("Passwords do not match.");
-
     setLoading(true);
     try {
-      // Only fetch the enrollment phrase and user is not created in Supabase yet
       const { phrase: p } = await api.getPhrase();
       setPhrase(p);
       setStep(1);
@@ -71,8 +79,7 @@ export default function EnrollPage() {
     }
   }
 
-  // Step 2: Collect attempts locally
-
+  // ── Step 2: Collect phrase attempts ───────────────────────────────────────
   async function handleAttemptSubmit() {
     if (typed.trim().toLowerCase() !== phrase.toLowerCase()) {
       setAttemptOk("err");
@@ -81,7 +88,6 @@ export default function EnrollPage() {
       inputRef.current?.focus();
       return;
     }
-
     const events = ks.getEvents();
     const newAttempts = [...collectedAttempts, events];
     setCollectedAttempts(newAttempts);
@@ -90,30 +96,27 @@ export default function EnrollPage() {
     ks.reset();
     inputRef.current?.focus();
 
-    // All attempts collected, now saving everything to Supabase
     if (newAttempts.length >= REQUIRED) {
       setLoading(true);
       try {
-        // 1. Create user in Supabase
+        // 1. Create user account
         const u = await api.register(
           username.trim().toLowerCase(),
           email.trim().toLowerCase(),
           password,
         );
         setUser(u);
-
-        // 2. Save all collected attempts sequentially
+        // 2. Save all collected phrase attempts
         for (const evts of newAttempts) {
           await api.saveAttempt(u.user_id, evts);
         }
-
         // 3. Train OC-SVM login model
         await api.trainModel(u.user_id);
-
+        // Move to free-text seeding step
         setStep(3);
+        setTimeout(() => freeTextRef.current?.focus(), 150);
       } catch (e) {
         setError(e.message);
-        // Roll back so user can retry from the enroll step
         setCollectedAttempts([]);
         setAttemptOk(null);
       } finally {
@@ -127,6 +130,32 @@ export default function EnrollPage() {
     if (e.key === "Enter") handleAttemptSubmit();
   }
 
+  // ── Step 3: Free-text keystroke collection ────────────────────────────────
+  function handleFreeKeyDown(e) {
+    freeKs.onKeyDown(e);
+    setFreeKeyCount((c) => c + 1);
+  }
+
+  async function handleSeedSession() {
+    setSeedError("");
+    if (!freeReady) return;
+    setSeedLoading(true);
+    try {
+      await api.seedSession(user.user_id, freeKs.getEvents());
+      setStep(4);
+    } catch (e) {
+      // Seeding failure is non-fatal — session model builds in first session instead
+      setSeedError(
+        e.message +
+          " (You can still log in, model will build during your session.)",
+      );
+      setStep(4);
+    } finally {
+      setSeedLoading(false);
+    }
+  }
+
+  // ── Stepper ────────────────────────────────────────────────────────────────
   function Stepper() {
     return (
       <div
@@ -181,7 +210,7 @@ export default function EnrollPage() {
               </div>
               <span
                 style={{
-                  fontSize: "0.65rem",
+                  fontSize: "0.62rem",
                   marginTop: 3,
                   whiteSpace: "nowrap",
                   color: i === step ? "#1a1a2e" : "#9CA3AF",
@@ -196,7 +225,7 @@ export default function EnrollPage() {
                 style={{
                   flex: 1,
                   height: 2,
-                  margin: "0 6px",
+                  margin: "0 4px",
                   marginBottom: 16,
                   background: i < step ? "#4F46E5" : "#E8ECF4",
                   transition: "background 0.2s",
@@ -235,7 +264,7 @@ export default function EnrollPage() {
 
       {error && <div style={styles.alert("error")}>{error}</div>}
 
-      {/* Step 0: Registration form */}
+      {/* ── Step 0: Registration form ── */}
       {step === 0 && (
         <div style={styles.card}>
           <div
@@ -338,8 +367,8 @@ export default function EnrollPage() {
                   top: "50%",
                   transform: "translateY(-50%)",
                   fontSize: 18,
-                  color: password === confirmPassword ? "#059669" : "#DC2626",
                   pointerEvents: "none",
+                  color: password === confirmPassword ? "#059669" : "#DC2626",
                 }}
               >
                 {password === confirmPassword ? "check_circle" : "cancel"}
@@ -357,7 +386,7 @@ export default function EnrollPage() {
         </div>
       )}
 
-      {/* Step 1: Guide */}
+      {/* ── Step 1: Guide ── */}
       {step === 1 && (
         <div style={styles.card}>
           <div
@@ -396,28 +425,28 @@ export default function EnrollPage() {
             {[
               {
                 icon: "keyboard",
-                title: "Type a fixed phrase 5 times",
-                desc: "You will be asked to type the same sentence multiple times. This helps the system understand your natural typing rhythm.",
+                title: "Fixed Phrase Entry",
+                desc: "You will be asked to type the same phrase eight times. This process trains the login verification model.",
               },
               {
                 icon: "speed",
-                title: "Type naturally",
-                desc: "There is no need to rush or slow down. Just type the way you usually do.",
+                title: "Typing Instructions",
+                desc: "Please type at your natural pace. Avoid intentionally speeding up or slowing down, as consistency improves model accuracy.",
               },
               {
-                icon: "check_circle",
-                title: "Make sure the phrase is exact",
-                desc: "Each attempt is checked against the original sentence. If there is any mismatch, it would not be counted, so simply try again.",
+                icon: "edit_note",
+                title: "Type freely (~200 keystrokes)",
+                desc: "After completing the fixed phrase step, you can type freely. This stage trains the continuous session model, enabling real-time authentication from your very first login.",
               },
               {
                 icon: "model_training",
-                title: "Model trains automatically",
-                desc: "Once you complete 5 correct attempts, the system automatically builds your typing pattern model and saves your account.",
+                title: "Automated Model Training",
+                desc: "Both the login and session models are trained and stored automatically. No additional setup is required.",
               },
               {
                 icon: "policy",
-                title: "What Happens During Login",
-                desc: "Every time you log in, you will type the same phrase again. Your typing pattern is instantly compared with your saved profile to verify your identity in real time.",
+                title: "Continuous Session Protection",
+                desc: "During active sessions, the system verifies your identity every 100 keystrokes. Any significant deviation in typing behavior triggers an anomaly alert.",
               },
             ].map(({ icon, title, desc }) => (
               <div
@@ -519,7 +548,7 @@ export default function EnrollPage() {
         </div>
       )}
 
-      {/* Step 2: Collect attempts */}
+      {/* ── Step 2: Phrase attempts ── */}
       {step === 2 && (
         <div style={styles.card}>
           <div
@@ -544,7 +573,7 @@ export default function EnrollPage() {
                   fontFamily: "'Space Grotesk',sans-serif",
                 }}
               >
-                Enrollment
+                Phrase Enrollment
               </span>
             </div>
             <span
@@ -560,7 +589,6 @@ export default function EnrollPage() {
             </span>
           </div>
 
-          {/* Progress bar */}
           <div
             style={{
               background: "#E8ECF4",
@@ -581,7 +609,6 @@ export default function EnrollPage() {
             />
           </div>
 
-          {/* Phrase */}
           <div
             style={{
               background: "#F5F3FF",
@@ -630,7 +657,7 @@ export default function EnrollPage() {
               >
                 check_circle
               </span>
-              Attempt {saved} recorded, {REQUIRED - saved} more to go.
+              Attempt {saved} recorded — {REQUIRED - saved} more to go.
             </div>
           )}
           {attemptOk === "ok" && saved >= REQUIRED && (
@@ -648,7 +675,7 @@ export default function EnrollPage() {
               >
                 check_circle
               </span>
-              All {REQUIRED} attempts collected. Saving your profile now...
+              All {REQUIRED} attempts done. Training your profile now...
             </div>
           )}
           {attemptOk === "err" && (
@@ -666,7 +693,7 @@ export default function EnrollPage() {
               >
                 error
               </span>
-              Phrase did not match. Please type it exactly as shown.
+              Phrase did not match — type it exactly as shown.
             </div>
           )}
           {loading && (
@@ -684,7 +711,7 @@ export default function EnrollPage() {
               >
                 hourglass_top
               </span>
-              Creating your account and training your model. Please Wait...
+              Creating your account and training login model. Please wait...
             </div>
           )}
 
@@ -709,7 +736,6 @@ export default function EnrollPage() {
             {loading ? "Saving profile..." : "Submit Attempt"}
           </button>
 
-          {/* Attempt dots */}
           <div
             style={{
               display: "flex",
@@ -740,13 +766,195 @@ export default function EnrollPage() {
             }}
           >
             {saved} / {REQUIRED} attempts collected
-            {saved === 0 && "nothing saved to server yet"}
+            {saved === 0 && " — nothing saved to server yet"}
           </p>
         </div>
       )}
 
-      {/* Step 3: Done */}
+      {/* ── Step 3: Free-text typing to seed session LOF ── */}
       {step === 3 && user && (
+        <div style={styles.card}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginBottom: 6,
+            }}
+          >
+            <span
+              className="material-symbols-outlined"
+              style={{ fontSize: 20, color: "#4F46E5" }}
+            >
+              edit_note
+            </span>
+            <span
+              style={{
+                fontWeight: 700,
+                fontSize: "1rem",
+                fontFamily: "'Space Grotesk',sans-serif",
+              }}
+            >
+              Session Profile Setup
+            </span>
+            <span
+              style={{
+                marginLeft: "auto",
+                ...styles.badge(freeReady ? "green" : "blue"),
+                fontSize: "0.72rem",
+              }}
+            >
+              {freeReady
+                ? "Ready!"
+                : `${freeKeyCount} / ${FREE_TEXT_TARGET} keystrokes`}
+            </span>
+          </div>
+
+          <div style={{ ...styles.alert("info"), marginBottom: 14 }}>
+            <span
+              className="material-symbols-outlined"
+              style={{ fontSize: 15, verticalAlign: "middle", marginRight: 6 }}
+            >
+              info
+            </span>
+            Last step! Type anything freely for ~200
+            keystrokes.
+          </div>
+
+          <div
+            style={{
+              background: "#E8ECF4",
+              borderRadius: 99,
+              height: 8,
+              marginBottom: 4,
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                height: "100%",
+                borderRadius: 99,
+                background: freeReady
+                  ? "linear-gradient(90deg, #059669, #10B981)"
+                  : "linear-gradient(90deg, #6D28D9, #4F46E5)",
+                width: `${freeProgress}%`,
+                transition: "width 0.2s ease, background 0.4s",
+              }}
+            />
+          </div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: 12,
+            }}
+          >
+            <span style={{ fontSize: "0.72rem", color: "#6B7280" }}>
+              Free-text keystrokes
+            </span>
+            <span
+              style={{
+                fontSize: "0.72rem",
+                fontWeight: 600,
+                color: freeReady ? "#059669" : "#4F46E5",
+              }}
+            >
+              {freeKeyCount} / {FREE_TEXT_TARGET}
+            </span>
+          </div>
+
+          <p
+            style={{
+              fontSize: "0.76rem",
+              color: "#6B7280",
+              marginBottom: 8,
+              lineHeight: 1.6,
+            }}
+          >
+            Type a sentence or just write your thoughts. The
+            content does not matter only your typing rhythm is captured.
+          </p>
+
+          <textarea
+            ref={freeTextRef}
+            rows={6}
+            style={{
+              ...styles.input,
+              resize: "vertical",
+              lineHeight: 1.6,
+              fontSize: "0.88rem",
+              marginBottom: 12,
+            }}
+            placeholder="Type anything here..."
+            value={freeText}
+            onChange={(e) => setFreeText(e.target.value)}
+            onKeyDown={handleFreeKeyDown}
+            onKeyUp={freeKs.onKeyUp}
+            disabled={seedLoading}
+            spellCheck={false}
+          />
+
+          {seedError && (
+            <div style={{ ...styles.alert("error"), marginBottom: 10 }}>
+              <span
+                className="material-symbols-outlined"
+                style={{
+                  fontSize: 15,
+                  verticalAlign: "middle",
+                  marginRight: 6,
+                }}
+              >
+                warning
+              </span>
+              {seedError}
+            </div>
+          )}
+
+          {!freeReady && (
+            <div style={{ ...styles.alert("info"), marginBottom: 10 }}>
+              <span
+                className="material-symbols-outlined"
+                style={{
+                  fontSize: 15,
+                  verticalAlign: "middle",
+                  marginRight: 6,
+                }}
+              >
+                keyboard
+              </span>
+              {FREE_TEXT_TARGET - freeKeyCount} more keystrokes needed to
+              complete setup.
+            </div>
+          )}
+
+          <button
+            style={{ ...styles.btnIndigo, opacity: freeReady ? 1 : 0.5 }}
+            onClick={handleSeedSession}
+            disabled={!freeReady || seedLoading}
+          >
+            {seedLoading
+              ? "Training session model..."
+              : freeReady
+                ? "Complete Enrollment →"
+                : `Type ${FREE_TEXT_TARGET - freeKeyCount} more keystrokes...`}
+          </button>
+
+          <p
+            style={{
+              textAlign: "center",
+              fontSize: "0.72rem",
+              color: "#9CA3AF",
+              marginTop: 10,
+            }}
+          >
+            Your login model is already saved. This step trains the continuous
+            session model.
+          </p>
+        </div>
+      )}
+
+      {/* ── Step 4: Done ── */}
+      {step === 4 && user && (
         <div style={styles.card}>
           <div style={{ textAlign: "center", padding: "1rem 0" }}>
             <div
@@ -779,9 +987,9 @@ export default function EnrollPage() {
               Enrollment Complete
             </h2>
             <p
-              style={{ fontSize: "0.82rem", color: "#6B7280", marginBottom: 6 }}
+              style={{ fontSize: "0.82rem", color: "#6B7280", marginBottom: 4 }}
             >
-              Your account and typing profile have been saved successfully.
+              Account is created in ContinuAuth
             </p>
             <p
               style={{
@@ -793,31 +1001,71 @@ export default function EnrollPage() {
               Logged in as <strong>{user.username}</strong>
             </p>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {[{ text: "Account created in ContinuAuth" }].map(({ text }) => (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+                marginBottom: 20,
+                textAlign: "left",
+              }}
+            >
+              {[
+                {
+                  icon: "verified_user",
+                  text: "Your login model is ready, your phrase can now be used to verify you",
+                },
+                {
+                  icon: "model_training",
+                  text: "Your session model is set up, so continuous authentication starts right away.",
+                },
+              ].map(({ icon, text }) => (
                 <div
                   key={text}
                   style={{
                     display: "flex",
                     alignItems: "center",
-                    gap: 8,
-                    justifyContent: "center",
+                    gap: 10,
+                    padding: "0.5rem 0.75rem",
+                    background: "#F0FDF4",
+                    borderRadius: 8,
+                    border: "1px solid #BBF7D0",
                   }}
                 >
                   <span
                     className="material-symbols-outlined"
-                    style={{ fontSize: 16, color: "#059669" }}
+                    style={{ fontSize: 18, color: "#059669", flexShrink: 0 }}
                   >
-                    check
+                    {icon}
                   </span>
-                  <span style={{ fontSize: "0.8rem", color: "#374151" }}>
+                  <span style={{ fontSize: "0.78rem", color: "#166534" }}>
                     {text}
                   </span>
                 </div>
               ))}
             </div>
 
-            <hr style={{ ...styles.divider, margin: "1.2rem 0" }} />
+            {/* <div
+              style={{
+                ...styles.alert("info"),
+                textAlign: "left",
+                marginBottom: 20,
+              }}
+            >
+              <span
+                className="material-symbols-outlined"
+                style={{
+                  fontSize: 15,
+                  verticalAlign: "middle",
+                  marginRight: 6,
+                }}
+              >
+                info
+              </span>
+              At login time, type the phrase to verify identity and during sessions,
+              ContinuAuth checks every 100 keystrokes a different typing
+              rhythm triggers an anomaly alert.
+            </div> */}
 
             <button
               style={styles.btnIndigo}
